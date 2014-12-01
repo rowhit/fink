@@ -289,6 +289,7 @@ our %pkglist_fields = map {lc $_, 1}
 	 'Suggests',
 	 'Recommends',
 	 'Enhances',
+	 'Replaces',
 	 # 'Architecture' is not a "Depends"-style list, but its syntax is
 	 # like a package-list, so piggy-back on those fields' parser
 	 'Architecture',
@@ -1013,6 +1014,31 @@ sub validate_info_file {
 				$looks_good = 0;
 			}
 		}
+
+		# Language-versioned packages need the language itself
+		# (otherwise mis- or fail-to-build, and not usable at
+		# runtime). Require only for bottom of lang-versioned
+		# dep-trees (e.g., varianted perlmods that do not depend on
+		# other varianted perlmods must depend on varianted perl
+		# interp). Higher parts of dep-tree thus get them indirectly.
+		# Skip obsolete packages (replacement might be unified).
+		if ($name =~ /-(pm|py|rb)(\d+)/) {
+			my $modpkg = "-$1$2";
+			my $langpkg;
+			if ($1 eq 'pm') {
+				$langpkg = "perl$2-core";
+			} elsif ($1 eq 'py') {
+				$langpkg = "python$2";
+			} else {
+				$langpkg = "ruby$2";
+			}
+
+			my $depends = $pv->pkglist_default('depends', '');
+			unless ($depends =~ /(\A|,|\s)($langpkg|.*$modpkg)(-|\z|,|\s|\()/ || $pv->is_obsolete) {
+				print "Error: language-versioned package $name needs Depends on another $modpkg (package of the same language-version) or on $langpkg (the language interpretter itself). ($filename)\n";
+				$looks_good = 0;
+			}
+		}
 	}
 
 	if ($looks_good and $config->verbosity_level() >= 3) {
@@ -1393,12 +1419,12 @@ sub validate_info_component {
 				$looks_good = 0;
 				next;
 			}
-			if (not $shlibs_parts[0] =~ /^(\%p)?\//) {
-				print "Warning: Pathname \"$shlibs_parts[0]\" is not absolute and is not in \%p in field \"shlibs\"$splitoff_field. ($filename)\n";
+			if (not $shlibs_parts[0] =~ /^(\%p|@[a-z,_]*path)?\//) {
+				print "Warning: Pathname \"$shlibs_parts[0]\" is not absolute and is not in \%p or a runtime path in field \"shlibs\"$splitoff_field. ($filename)\n";
 				$looks_good = 0;
 			}
 			if ($shlibs{$shlibs_parts[0]}++) {
-				print "Warning: File \"$shlibs_parts[0]\" is listed more than once in field \"shlibs\"$splitoff_field. ($filename)\n";
+				print "Warning: Entry \"$shlibs_parts[0]\" is listed more than once in field \"shlibs\"$splitoff_field. ($filename)\n";
 				$looks_good = 0;
 			}
 			if (not $shlibs_parts[1] =~ /^\d+\.\d+\.\d+$/) {
@@ -1451,7 +1477,6 @@ sub validate_info_component {
 	}
 
 	# Special checks when package building script uses an explicit interp
-
 
 	foreach my $field (qw/patchscript compilescript installscript testscript/) {
 		next unless defined ($value = $properties->{$field});
@@ -1811,6 +1836,22 @@ sub _validate_dpkg {
 		if ($filename =~/\/include\// && !-d $File::Find::name) {
 			$installed_headers = 1;
 		}
+		if ($filename =~/\.framework\/(.+)/) {
+			# heuristic for Framework library suites
+			if (-d $File::Find::name && !-l $File::Find::name) {
+				# allow real directory (only care about real file or
+				# symlink to dir ("real file" on disk) that would
+				# collide among .deb)
+			} else {
+				my $component = $1;
+				if ($component eq 'Versions/Current/' or $component !~ /^Versions\//) {
+					# non-libversioned Framework files
+					if (!exists $deb_control->{builddependsonly} or $deb_control->{builddependsonly} =~ /Undefined/) {
+						&stack_msg($msgs, "Framework files not part of a specific library-version, but package does not declare BuildDependsOnly to be true (or false)", $filename);
+					}
+				}
+			}
+		}
 
 		if ($filename =~ /\.(dylib|jnilib|so|bundle)$/) {
 			if ($filename =~ /\.dylib$/) {
@@ -2093,16 +2134,24 @@ sub _validate_dpkg {
 		print "Warning: Package has shlibs data but otool is not in the path; skipping parts of shlibs validation.\n";
 	}
 	foreach my $shlibs_file (sort keys %$deb_shlibs) {
-		my $file = resolve_rooted_symlink($destdir, $shlibs_file);
+		my ($file, $named_file);
+		#discard runtime path portion of the install_name
+		($named_file) = $shlibs_file =~ /^\@[a-z,_]*path\/(.*)/ ; 
+		if ( $named_file ) {
+			find ({wanted => sub {$file = $File::Find::name if m,$named_file,}, no_chdir=>1 }, $destdir);
+		} else {
+			$file = resolve_rooted_symlink($destdir, $shlibs_file);
+		}
 		if (not defined $file) {
 			if ($deb_control->{'package'} eq 'fink') {
-				# fink is a special case, it has an shlibs field that provides system-shlibs
+				# fink is a special case, it has a shlibs field that provides system-shlibs
 			} elsif ($deb_shlibs->{$shlibs_file}->{'is_private'}) {
+				# AKH: it appears that we've been allowing @rpath and friends for private libraries?
 				if ($shlibs_file !~ /^\@/) {
-					print "Warning: Shlibs field specifies private file '$shlibs_file', but it does not exist!\n";
+					print "Warning: Shlibs field specifies private install_name '$shlibs_file', but it does not exist!\n";
 				}
 			} else {
-				print "Error: Shlibs field specifies file '$shlibs_file', but it does not exist!\n";
+				print "Error: Shlibs field specifies install_name '$shlibs_file', but it does not exist!\n";
 				$looks_good = 0;
 			}
 		} elsif (not -f $file) {
@@ -2114,7 +2163,7 @@ sub _validate_dpkg {
 			if (defined $otool) {
 				if (open (OTOOL, "$otool -L '$file' |")) {
 					<OTOOL>; # skip the first line
-					my ($libname, $compat_version) = <OTOOL> =~ /^\s*(\/.+?)\s*\(compatibility version ([\d\.]+)/;
+					my ($libname, undef, $compat_version) = <OTOOL> =~ /^\s*((\/|@[a-z,_]*path\/).+?)\s*\(compatibility version ([\d\.]+)/;
 					close (OTOOL);
 
 					if (!defined $libname or !defined $compat_version) {
@@ -2127,11 +2176,11 @@ sub _validate_dpkg {
 						}
 					}
 					if (!defined $libname or !defined $compat_version) {
-						print "Error: File name '$shlibs_file' specified in Shlibs does not appear to have linker data at all\n";
+						print "Error: Name '$shlibs_file' specified in Shlibs does not appear to have linker data at all\n";
 						$looks_good = 0;
 					} else {
 						if ($shlibs_file ne $libname) {
-							print "Error: File name '$shlibs_file' specified in Shlibs does not match install_name '$libname'\n";
+							print "Error: Name '$shlibs_file' specified in Shlibs does not match install_name '$libname'\n";
 						}
 						if ($deb_shlibs->{$shlibs_file}->{'compatibility_version'} ne $compat_version) {
 							print "Error: Shlibs field says compatibility version for $shlibs_file is ".$deb_shlibs->{$shlibs_file}->{'compatibility_version'}.", but it is actually $compat_version.\n";
@@ -2157,12 +2206,12 @@ sub _validate_dpkg {
 					<OTOOL>; # skip first line
 					my ($libname, $compat_version) = <OTOOL> =~ /^\s*(\S+)\s*\(compatibility version ([\d\.]+)/;
 					close (OTOOL);
-					if ($libname !~ /^\//) {
+					if (($libname !~ /^\//) and ($libname !~ /^\@[a-z,_]*path\//)) {
 						print "Error: package contains the shared library\n";
 						print "          $dylib\n";
 						print "       but the corresponding install_name\n";
 						print "          $libname\n";
-						print "       is not an absolute pathname.\n";
+						print "       is not an absolute pathname or runtime path.\n";
 						$looks_good = 0;
 					} elsif (not exists $deb_shlibs->{$libname}) {
 						$libname =~ s/^$basepath/%p/;
@@ -2173,6 +2222,21 @@ sub _validate_dpkg {
 						print "       are not listed in the Shlibs field.  See the packaging manual.\n";
 						$looks_good = 0;
 					}
+				}
+				if (open (OTOOL, "$otool -hv '$dylib_temp' |")) {
+					<OTOOL>; <OTOOL>; <OTOOL>; # skip first three lines
+					unless ( <OTOOL> =~ /TWOLEVEL/ ) {
+						print "Error: $dylib_temp appears to have been linked using a flat namespace.\n";
+						print "       If this package BuildDepends on libtool2, make sure that you use\n";
+						print "          BuildDepends: libtool2 (>= 2.4.2-4).\n";
+						print "       and use autoreconf to regenerate the configure script.\n";
+						print "       If the package doesn't BuildDepend on libtool2, you'll need to\n";
+						print "       update its build procedure to avoid passing\n";	 
+						print "          -Wl,-flat_namespace\n"; 
+						print "       when linking libraries.\n";
+						$looks_good = 0;
+					} 
+					close (OTOOL);
 				}
 			}
 		}
