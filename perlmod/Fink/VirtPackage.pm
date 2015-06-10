@@ -74,7 +74,7 @@ BEGIN {
 our @EXPORT_OK;
 
 my $pkgconfig_virtual_prefix = 'system-pkgconfig-';
-my @xservers                 = ('XDarwin', 'Xquartz', 'XDarwinQuartz');
+my @xservers                 = ('Xquartz', 'XDarwin', 'XDarwinQuartz');
 my $the_instance             = undef;
 
 END { }				# module clean-up code here (global destructor)
@@ -280,7 +280,6 @@ END
 		if ($perlver >= 5.008001) {
 			push(@modules,
 				'attribute-handlers',
-				'cgi',
 				'data-dumper',
 				'db',
 				'devel-peek',
@@ -311,6 +310,13 @@ END
 				'time-hires',
 				'unicode-normalize',
 			);
+			if ($perlver < 5.019007) {
+				push(@modules,
+					 # CGI still present until 5.21.0 but will spew
+					 # deprecation diagnostics every time it's used
+					 'cgi',
+				);
+			}
 			if ($perlver < 5.015000) {
 				push(@modules,
 					 'devel-dprof',
@@ -1454,7 +1460,12 @@ virtual packages. (See &package_from_pkgconfig).
 
 =cut
 
-	for my $dir ('/usr/X11/lib/pkgconfig', '/usr/X11R6/lib/pkgconfig', '/usr/lib/pkgconfig') {
+	our @x11_dirs=('/usr/X11R6'); 
+#   uncomment the line below when 10.7 and 10.8 are no longer supported, or 
+#   better yet, just put /opt/X11 above without a conditional.
+#	unshift (@x11_dirs,'/opt/X11') if $osxversion >= 12 ; # Xquartz is supported only for Mountain Lion and later 
+	for my $base_dir (@x11_dirs, '/usr') {
+		my $dir = "$base_dir/lib/pkgconfig";
 		next unless (-d $dir);
 		if (opendir(PKGCONFIG_DIR, $dir)) {
 			while (my $file = readdir(PKGCONFIG_DIR)) {
@@ -1577,17 +1588,19 @@ END
 				($xver) = check_x11_version();
 			}
 
+			my $x_tree; # Once we've got the X11 tree, we'll be using it later
 			if (defined $xver) {
 				$hash = {};
 				my $provides;
 
 				my $found_xserver = 0;
 				print STDERR "- checking for X servers... " if ($options{debug});
-				XSERVERLOOP: for my $xdir ('/usr/X11R6', '/usr/X11') {
+				XSERVERLOOP: for my $xdir (@x11_dirs) {
 					for my $xserver (@xservers) {
 						if (-x $xdir . '/bin/' . $xserver) {
 							print STDERR "$xdir/bin/$xserver\n" if ($options{debug});
 							$found_xserver++;
+							$x_tree = $xdir ; 
 							last XSERVERLOOP;
 						}
 					}
@@ -1700,8 +1713,8 @@ only version 1 is considered.
 =cut
 
 				if ( has_lib('libXft.dylib') ) {
-					if ( defined readlink('/usr/X11R6/lib/libXft.dylib') ) {
-						my $link = readlink('/usr/X11R6/lib/libXft.dylib');
+					if ( defined readlink("$x_tree/lib/libXft.dylib") ) {
+						my $link = readlink("$x_tree/lib/libXft.dylib");
 						if ($link =~ /libXft\.(\d)/) {
 							my $major_version = $1;
 							if ($major_version ne 1) {
@@ -1737,14 +1750,12 @@ It is considered present if /usr/X11R6/bin/rman exists.
 =cut
 
 				print STDERR "- checking for rman... " if ($options{debug});
-				for my $xdir ('/usr/X11R6', '/usr/X11') {
-					print STDERR "$xdir... " if ($options{debug});
-					if (-x $xdir . '/bin/rman') {
-						print STDERR "found, system-xfree86 provides rman\n" if ($options{debug});
-						push(@{$provides->{'system-xfree86'}}, 'rman');
-					} else {
-						print STDERR "missing\n" if ($options{debug});
-					}
+				print STDERR "$x_tree... " if ($options{debug});
+				if (-x "$x_tree/bin/rman") {
+					print STDERR "found, system-xfree86 provides rman\n" if ($options{debug});
+					push(@{$provides->{'system-xfree86'}}, 'rman');
+				} else {
+					print STDERR "missing\n" if ($options{debug});
 				}
 
 =item "xfree86-base-threaded" and "xfree86-base-threaded-shlibs"
@@ -1758,8 +1769,8 @@ in the library.
 =cut
 
 				print STDERR "- checking for threaded libXt... " if ($options{debug});
-				if (-f '/usr/X11R6/lib/libXt.6.dylib' and -x '/usr/bin/grep') {
-					if (system('/usr/bin/grep', '-q', '-a', 'pthread_mutex_lock', '/usr/X11R6/lib/libXt.6.dylib') == 0) {
+				if (-f "$x_tree/lib/libXt.6.dylib" and -x '/usr/bin/grep') {
+					if (system('/usr/bin/grep', '-q', '-a', 'pthread_mutex_lock', "$x_tree/lib/libXt.6.dylib") == 0) {
 						print STDERR "threaded\n" if ($options{debug});
 						print STDERR "  - system-xfree86-shlibs provides xfree86-base-threaded-shlibs\n" if ($options{debug});
 						push(@{$provides->{'system-xfree86-shlibs'}}, 'xfree86-base-threaded-shlibs');
@@ -1993,15 +2004,16 @@ Returns true if found, false if not.
 
 sub has_header {
 	my $headername = shift;
-	my $dir;
+
+	our @x11_dirs;
 
 	print STDERR "- checking for header $headername... " if ($options{debug});
 	if ($headername =~ /^\// and -f $headername) {
 		print STDERR "found\n" if ($options{debug});
 		return 1;
 	} else {
-		for $dir ('/usr/X11R6/include', $basepath . '/include', '/usr/include') {
-			if (-f $dir . '/' . $headername) {
+		for my $dir (@x11_dirs, $basepath, '/usr') {
+			if (-f $dir. '/include/' . $headername) {
 				print STDERR "found in $dir\n" if ($options{debug});
 				return 1;
 			}
@@ -2021,15 +2033,16 @@ Returns true if found, false if not.
 
 sub has_lib {
 	my $libname = shift;
-	my $dir;
+
+	our @x11_dirs;
 
 	print STDERR "- checking for library $libname... " if ($options{debug});
 	if ($libname =~ /^\// and -f $libname) {
 		print STDERR "found\n" if ($options{debug});
 		return 1;
 	} else {
-		for $dir ('/usr/X11R6/lib', $basepath . '/lib', '/usr/lib') {
-			if (-f $dir . '/' . $libname) {
+		for my $dir (@x11_dirs, $basepath , '/usr') {
+			if (-f $dir . '/lib/' . $libname) {
 				print STDERR "found in $dir\n" if ($options{debug});
 				return 1;
 			}
@@ -2134,9 +2147,10 @@ Returns the X11 version if found.
 
 ### Check the installed x11 version
 sub check_x11_version {
+	our @x11_dirs;
 	my (@XF_VERSION_COMPONENTS, $XF_VERSION);
 	for my $checkfile ('xterm.1', 'bdftruncate.1', 'gccmakedep.1') {
-		for my $xdir ('/usr/X11R6', '/usr/X11') {
+		for my $xdir (@x11_dirs) {
 			if (-f "$xdir/man/man1/$checkfile") {
 				if (open(CHECKFILE, "$xdir/man/man1/$checkfile")) {
 					while (<CHECKFILE>) {
@@ -2158,7 +2172,7 @@ sub check_x11_version {
 	}
 	if (not defined $XF_VERSION) {
 		for my $binary (@xservers, 'X') {
-			for my $xdir ('/usr/X11R6', '/usr/X11') {
+			for my $xdir (@x11_dirs) {
 				if (-x $xdir . '/bin/' . $binary) {
 					if (open (XBIN, "$xdir/bin/$binary -version 2>\&1 |")) {
 						while (my $line = <XBIN>) {

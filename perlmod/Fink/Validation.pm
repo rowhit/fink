@@ -984,37 +984,39 @@ sub validate_info_file {
 	foreach my $pv (@pvs) {
 		# sanity-checks for each in family (including variants and splitoffs)
 
-		my $desc = $pv->{description};
 		my $name = $pv->get_name();
 
-		if (length($desc) > 60 and !$pv->is_obsolete()) {
-			print "Error: Description of \"$name\" exceeds 60 characters. ($filename)\n";
-			$looks_good = 0;
-		} elsif (Fink::Config::get_option("Pedantic")) {
-			# Some pedantic checks
-			if (length($desc) > 45 and !$pv->is_obsolete() ) {
-				print "Warning: Description of \"$name\" exceeds 45 characters. ($filename)\n";
+		# misc rules for the Description field (if there is one)
+		if (defined (my $desc = $pv->{description})) {
+			if (length($desc) > 60 and !$pv->is_obsolete()) {
+				print "Error: Description of \"$name\" exceeds 60 characters. ($filename)\n";
 				$looks_good = 0;
-			}
-			if ($desc =~ m/^[Aa]n? /) {
-				print "Warning: Description of \"$name\" starts with \"A\" or \"An\". ($filename)\n";
-				$looks_good = 0;
-			}
-			if ($desc =~ m/^[a-z]/) {
-				print "Warning: Description of \"$name\" starts with lower case. ($filename)\n";
-				$looks_good = 0;
-			}
-			if ($desc =~ /\b\Q$name\E\b/i and !$pv->is_obsolete() ) {
-				print "Warning: Description of \"$name\" contains package name. ($filename)\n";
-				$looks_good = 0;
-			}
-			if ($desc =~ m/\.$/) {
-				print "Warning: Description of \"$name\" ends with \".\". ($filename)\n";
-				$looks_good = 0;
-			}
-			if ($desc =~ m/^\[/) {
-				print "Warning: Descriptions beginning with \"[\" are only for special types of packages. ($filename)\n";
-				$looks_good = 0;
+			} elsif (Fink::Config::get_option("Pedantic")) {
+				# Some pedantic checks
+				if (length($desc) > 45 and !$pv->is_obsolete() ) {
+					print "Warning: Description of \"$name\" exceeds 45 characters. ($filename)\n";
+					$looks_good = 0;
+				}
+				if ($desc =~ m/^[Aa]n? /) {
+					print "Warning: Description of \"$name\" starts with \"A\" or \"An\". ($filename)\n";
+					$looks_good = 0;
+				}
+				if ($desc =~ m/^[a-z]/) {
+					print "Warning: Description of \"$name\" starts with lower case. ($filename)\n";
+					$looks_good = 0;
+				}
+				if ($desc =~ /\b\Q$name\E\b/i and !$pv->is_obsolete() ) {
+					print "Warning: Description of \"$name\" contains package name. ($filename)\n";
+					$looks_good = 0;
+				}
+				if ($desc =~ m/\.$/) {
+					print "Warning: Description of \"$name\" ends with \".\". ($filename)\n";
+					$looks_good = 0;
+				}
+				if ($desc =~ m/^\[/) {
+					print "Warning: Descriptions beginning with \"[\" are only for special types of packages. ($filename)\n";
+					$looks_good = 0;
+				}
 			}
 		}
 
@@ -1040,6 +1042,21 @@ sub validate_info_file {
 			unless ($depends =~ /(\A|,|\s)($langpkg|.*$modpkg)(-|\z|,|\s|\()/ || $pv->is_obsolete) {
 				print "Error: language-versioned package $name needs Depends on another $modpkg (package of the same language-version) or on $langpkg (the language interpretter itself). ($filename)\n";
 				$looks_good = 0;
+			}
+		}
+
+		foreach my $field (sort keys %pkglist_fields) {
+			next if $field eq 'architecture'; # same format but entries not same as for dpkg package specs
+			foreach my $altspecs (@{&pkglist2lol($pv->pkglist_default($field, ''))}) {
+				foreach my $depspec (@$altspecs) {
+					$depspec =~ s/\s+//g;
+					my $verspec = ($depspec =~ s/\((.*)\)//);
+					if ($depspec =~ /[^+\-.a-z0-9]/) {
+						print "Error: invalid character in packagename \"$depspec\" in $field of package $name. ($filename)\n";
+						$looks_good = 0;
+					}
+					# TODO: check epoch, version, revision
+				}
 			}
 		}
 	}
@@ -1355,7 +1372,7 @@ sub validate_info_component {
 				my ($cond, $pkgname, $vers) = ($1, $2, $3);
 				# no logical AND (OR would be split() and give broken atoms)
 				if (defined $cond and $cond =~ /&/) {
-					print "Warning: invalid dependency \"$atom\" in \"$field\"$splitoff_field. ($filename)\n";
+					print "Warning: invalid conditional in dependency \"$atom\" in \"$field\"$splitoff_field. ($filename)\n";
 				}
 				if ($field eq 'architecture') {
 					$pkgname .= " ($vers)" if defined $vers;
@@ -2184,6 +2201,7 @@ sub _validate_dpkg {
 					} else {
 						if ($shlibs_file ne $libname) {
 							print "Error: Name '$shlibs_file' specified in Shlibs does not match install_name '$libname'\n";
+							$looks_good = 0;
 						}
 						if ($deb_shlibs->{$shlibs_file}->{'compatibility_version'} ne $compat_version) {
 							print "Error: Shlibs field says compatibility version for $shlibs_file is ".$deb_shlibs->{$shlibs_file}->{'compatibility_version'}.", but it is actually $compat_version.\n";
@@ -2229,15 +2247,17 @@ sub _validate_dpkg {
 				if (open (OTOOL, "$otool -hv '$dylib_temp' |")) {
 					<OTOOL>; <OTOOL>; <OTOOL>; # skip first three lines
 					unless ( <OTOOL> =~ /TWOLEVEL/ ) {
-						print "Error: $dylib_temp appears to have been linked using a flat namespace.\n";
+						print "SERIOUS WARNING: $dylib_temp appears to have been linked using a flat namespace.\n";
 						print "       If this package BuildDepends on libtool2, make sure that you use\n";
 						print "          BuildDepends: libtool2 (>= 2.4.2-4).\n";
 						print "       and use autoreconf to regenerate the configure script.\n";
 						print "       If the package doesn't BuildDepend on libtool2, you'll need to\n";
 						print "       update its build procedure to avoid passing\n";	 
 						print "          -Wl,-flat_namespace\n"; 
-						print "       when linking libraries.\n";
-						$looks_good = 0;
+						print "       when linking libraries.\n\n";
+						print "		  If this package actually requires a flat namespace build,\n";
+						print "		  then ignore this message.\n\n";
+						sleep 60;
 					} 
 					close (OTOOL);
 				}
