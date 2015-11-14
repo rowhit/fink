@@ -2,15 +2,36 @@ For a more comprehensive changelog of the latest experimental code, see:
         https://github.com/fink/fink/commits/
 
 /-------------
-| TBD
+| fink 0.39.x
 \-------------
-	
-	* Update Debian toolset.
-	* Selfupdate via git and svn.
+
+0.39.2 "Sheridan" (2015-10-31)
+	* Use system versions of tools (make, cp, chmod) in %{default_script}
+	* Add Restrictive/GPL and related License forms for OpenSSL-linked packages.
+
+0.39.1 "Pierce" (2015-10-03)
+	* Properly support Apple's JavaForOSX2015-1
+	* Bugfix: Downgrade errors during postinstall .deb migration to nonfatal warnings
+
+0.39.0 "Pike" (2015-10-01)
+	* Support OS 10.11
+	* Switch 10.9, 10.10, and 10.11 to use the 10.9-libcxx tree.
 
 /-------------
 | fink 0.38.x
 \-------------
+
+0.38.8 "Canyonlands" (2015-10-01)
+	* Last release to support 10.7 and 10.8.
+	* Updated pkgconfig path handling.
+
+0.38.7 "Bryce Canyon" (2015-08-15)
+	* Support OS 10.10.4 and 10.10.5
+	* Bugfix: Replace more version strings with version objects  so that 10.10+ do the 
+	  right thing under comparisons.
+	  * Avoids people seeing information about enabling the nonexistent unstable tree
+	  	on 10.7 and later.
+	  * Also prevent creation of %p/fink/dists/stable/crypto
 
 0.38.6 "Black Canyon of the Gunnison" (2015-06-13)
 	* Bugfix: Maximum Xcode version conditional for 10.9 was being applied
