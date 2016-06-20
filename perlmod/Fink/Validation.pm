@@ -4,7 +4,7 @@
 #
 # Fink - a package manager that downloads source and installs it
 # Copyright (c) 2001 Christoph Pfisterer
-# Copyright (c) 2001-2015 The Fink Package Manager Team
+# Copyright (c) 2001-2016 The Fink Package Manager Team
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -1337,7 +1337,7 @@ sub validate_info_component {
 		# check dpkg Depends-style field syntax
 		# Architecture is a special case of this same syntax
 		if ($pkglist_fields{$field}) {
-			(my $pkglist = $value) =~ tr/\n//d; # convert to single line
+			(my $pkglist = $value) =~ tr/\n/ /s; # convert to single line (NB: don't concat strings that were separated by lines)
 			if ($info_level >= 3) {
 				$pkglist =~ s/#.*$//mg;
 				$pkglist =~ s/,\s*$//;
@@ -1426,15 +1426,16 @@ sub validate_info_component {
 
 			if (/^\!\s*(.*)/) {
 				$looks_good = 0 unless _require_dep(\%options, { build => {'fink' => '0.28'} }, 'private-library entry in Shlibs', $filename);
-				if ($1 =~ /\s/) {
+				if ($1 =~ /(?<!\\)\s/) {
 					print "Warning: Malformed line in field \"shlibs\"$splitoff_field.\n  $_\n";
 					$looks_good = 0;
 				}
+				# no further testing of private-shlibs entries
 				next;
 			}
 
-			my @shlibs_parts;
-			if (scalar(@shlibs_parts = split ' ', $_, 3) != 3) {
+			my @shlibs_parts = split /(?<!\\)\s+/, $_, 3;
+			if (@shlibs_parts != 3) {
 				print "Warning: Malformed line in field \"shlibs\"$splitoff_field. ($filename)\n  $_\n";
 				$looks_good = 0;
 				next;
@@ -1717,7 +1718,7 @@ sub _validate_dpkg {
 		}
 	}
 
-	# read the shlibs database file
+	# read the shlibs database files
 	my $deb_shlibs = {};
 	{
 		foreach my $debfile ('shlibs', 'private-shlibs') {
@@ -1726,16 +1727,17 @@ sub _validate_dpkg {
 				if (open my $script, '<', $filename) {
 					chomp( my @deb_shlibs_raw = <$script> );  # slurp the data file
 					close $script;
-					my ($entry_filename, $entry_compat, $entry_deps);
 					foreach my $entry (@deb_shlibs_raw) {
-						if (($entry_filename) = $entry =~ /^\s*\!\s*(\S+)\s*$/) {
-							$deb_shlibs->{$entry_filename} = {
+						$entry =~ s/^\s*(.*?)\s*$/$1/;  # strip off leading/trailing whitespace
+						if ($entry =~ s/^\!\s*//) {
+							$deb_shlibs->{$entry} = {
 								is_private => 1,
 							};
-						} elsif (($entry_filename, $entry_compat, $entry_deps) = $entry =~ /^\s*(.+?)\s+(.+?)\s+(.*?)\s*$/) {
-							$deb_shlibs->{$entry_filename} = {
-								compatibility_version => $entry_compat,
-								dependencies          => $entry_deps,
+						} else {
+							my @entry_parts = split /(?<!\\)\s+/, $entry, 3;
+							$deb_shlibs->{$entry_parts[0]} = {
+								compatibility_version => $entry_parts[1],
+								dependencies          => $entry_parts[2],
 								is_private            => 0,
 							};
 						}
@@ -1880,9 +1882,8 @@ sub _validate_dpkg {
 			if (defined $otool) {
 				my $file = $destdir . $filename;
 				if (not -l $file) {
-					$file =~ s/\'/\\\'/gs;
-					if (open(OTOOL, "$otool -hv '$file' |")) {
-						while (my $line = <OTOOL>) {
+					if (open my $otool_fh, '-|', $otool, '-hv', $file) {
+						while (my $line = <$otool_fh>) {
 							if (my ($type) = $line =~ /MH_MAGIC.*\s+DYLIB(\s+|_STUB\s+)/) {
 								if ($filename !~ /\.(dylib|jnilib)$/) {
 									print "Warning: $filename is a DYLIB but it does not end in .dylib or .jnilib.\n";
@@ -1894,7 +1895,7 @@ sub _validate_dpkg {
 								}
 							}
 						}
-						close (OTOOL);
+						close $otool_fh;
 					}
 				}
 			} elsif ($filename =~/\.(dylib|jnilib)$/) {
@@ -2153,7 +2154,10 @@ sub _validate_dpkg {
 	if (%$deb_shlibs and not defined $otool) {
 		print "Warning: Package has shlibs data but otool is not in the path; skipping parts of shlibs validation.\n";
 	}
-	foreach my $shlibs_file (sort keys %$deb_shlibs) {
+	foreach my $shlibs_entry (sort keys %$deb_shlibs) {
+		my $shlibs_file = $shlibs_entry;
+		$shlibs_file =~ s/(?<!\\)\\((\\\\)*\s)/$1/g; # resolve backslashed whitespace (avoid backslashed backslashes)
+		$shlibs_file =~ s/\\\\/\\/g;  # resolve backslashed backslashes
 		my ($file, $named_file);
 		#discard runtime path portion of the install_name
 		($named_file) = $shlibs_file =~ /^\@[a-z,_]*path\/(.*)/ ; 
@@ -2165,7 +2169,7 @@ sub _validate_dpkg {
 		if (not defined $file) {
 			if ($deb_control->{'package'} eq 'fink') {
 				# fink is a special case, it has a shlibs field that provides system-shlibs
-			} elsif ($deb_shlibs->{$shlibs_file}->{'is_private'}) {
+			} elsif ($deb_shlibs->{$shlibs_entry}->{'is_private'}) {
 				# AKH: it appears that we've been allowing @rpath and friends for private libraries?
 				if ($shlibs_file !~ /^\@/) {
 					print "Warning: Shlibs field specifies private install_name '$shlibs_file', but it does not exist!\n";
@@ -2176,22 +2180,21 @@ sub _validate_dpkg {
 			}
 		} elsif (not -f $file) {
 			# shouldn't happen, resolve_rooted_symlink returns a file, or undef
-		} elsif ($deb_shlibs->{$shlibs_file}->{'is_private'}) {
+		} elsif ($deb_shlibs->{$shlibs_entry}->{'is_private'}) {
 			# don't validate private shlibs entries
 		} else {
-			$file =~ s/\'/\\\'/gs;
 			if (defined $otool) {
-				if (open (OTOOL, "$otool -L '$file' |")) {
-					<OTOOL>; # skip the first line
-					my ($libname, undef, $compat_version) = <OTOOL> =~ /^\s*((\/|@[a-z,_]*path\/).+?)\s*\(compatibility version ([\d\.]+)/;
-					close (OTOOL);
+				if (open my $otool_fh, '-|', $otool, '-L', $file) {
+					<$otool_fh>; # skip the first line
+					my ($libname, undef, $compat_version) = <$otool_fh> =~ /^\s*((\/|@[a-z,_]*path\/).+?)\s*\(compatibility version ([\d\.]+)/;
+					close $otool_fh;
 
 					if (!defined $libname or !defined $compat_version) {
 						if (defined $otool64) {
-							if (open (OTOOL, "$otool64 -L '$file' |")) {
-								<OTOOL>; # skip the first line
-								($libname, $compat_version) = <OTOOL> =~ /^\s*(\/.+?)\s*\(compatibility version ([\d\.]+)/;
-								close (OTOOL);
+							if (open my $otool_fh, '-|', $otool64, '-L', $file) {
+								<$otool_fh>; # skip the first line
+								($libname, $compat_version) = <$otool_fh> =~ /^\s*(\/.+?)\s*\(compatibility version ([\d\.]+)/;
+								close $otool_fh;
 							}
 						}
 					}
@@ -2203,8 +2206,8 @@ sub _validate_dpkg {
 							print "Error: Name '$shlibs_file' specified in Shlibs does not match install_name '$libname'\n";
 							$looks_good = 0;
 						}
-						if ($deb_shlibs->{$shlibs_file}->{'compatibility_version'} ne $compat_version) {
-							print "Error: Shlibs field says compatibility version for $shlibs_file is ".$deb_shlibs->{$shlibs_file}->{'compatibility_version'}.", but it is actually $compat_version.\n";
+						if ($deb_shlibs->{$shlibs_entry}->{'compatibility_version'} ne $compat_version) {
+							print "Error: Shlibs field says compatibility version for $shlibs_file is ".$deb_shlibs->{$shlibs_entry}->{'compatibility_version'}.", but it is actually $compat_version.\n";
 							$looks_good = 0;
 						}
 					}
@@ -2215,6 +2218,8 @@ sub _validate_dpkg {
 		}
 	}
 
+	{
+		my @flat_dylibs; # collect these then give a unified report later
 	for my $dylib (@installed_dylibs) {
 		next if (-l $destdir . $dylib);
 		if (defined $otool) {
@@ -2222,11 +2227,11 @@ sub _validate_dpkg {
 			if (not defined $dylib_temp) {
 				print "Warning: unable to resolve symlink for $dylib.\n";
 			} else {
-				$dylib_temp =~ s/\'/\\\'/gs;
-				if (open (OTOOL, "$otool -L '$dylib_temp' |")) {
-					<OTOOL>; # skip first line
-					my ($libname, $compat_version) = <OTOOL> =~ /^\s*(\S+)\s*\(compatibility version ([\d\.]+)/;
-					close (OTOOL);
+				if (open my $otool_fh, '-|', $otool, '-L', $dylib_temp) {
+					<$otool_fh>; # skip first line
+					my ($libname, $compat_version) = <$otool_fh> =~ /^\s*(.+?)\s*\(compatibility version ([\d\.]+)/;
+					close $otool_fh;
+					my $shlibs_entry = ($libname =~ s/(\s)/\\$1/g); # $deb_shlibs has backslash-protected whitespace
 					if (($libname !~ /^\//) and ($libname !~ /^\@[a-z,_]*path\//)) {
 						print "Error: package contains the shared library\n";
 						print "          $dylib\n";
@@ -2244,24 +2249,33 @@ sub _validate_dpkg {
 						$looks_good = 0;
 					}
 				}
-				if (open (OTOOL, "$otool -hv '$dylib_temp' |")) {
-					<OTOOL>; <OTOOL>; <OTOOL>; # skip first three lines
-					unless ( <OTOOL> =~ /TWOLEVEL/ ) {
-						print "SERIOUS WARNING: $dylib_temp appears to have been linked using a flat namespace.\n";
-						print "       If this package BuildDepends on libtool2, make sure that you use\n";
-						print "          BuildDepends: libtool2 (>= 2.4.2-4).\n";
-						print "       and use autoreconf to regenerate the configure script.\n";
-						print "       If the package doesn't BuildDepend on libtool2, you'll need to\n";
-						print "       update its build procedure to avoid passing\n";	 
-						print "          -Wl,-flat_namespace\n"; 
-						print "       when linking libraries.\n\n";
-						print "		  If this package actually requires a flat namespace build,\n";
-						print "		  then ignore this message.\n\n";
-						sleep 60;
+				if (open my $otool_fh, '-|', $otool, '-hv', $dylib_temp) {
+					<$otool_fh>; <$otool_fh>; <$otool_fh>; # skip first three lines
+					unless ( <$otool_fh> =~ /TWOLEVEL/ ) {
+						push @flat_dylibs, $dylib_temp;
 					} 
-					close (OTOOL);
+					close $otool_fh;
 				}
 			}
+		}
+	}
+
+		# msg has 1-minute sleep to view; only do it once per pkg
+		# (with all relevant files listed, not once per file)
+		if (@flat_dylibs) {
+			foreach (@flat_dylibs) {
+				print "SERIOUS WARNING: $_ appears to have been linked using a flat namespace.\n";
+			}
+			print "       If this package BuildDepends on libtool2, make sure that you use\n";
+			print "          BuildDepends: libtool2 (>= 2.4.2-4).\n";
+			print "       and use autoreconf to regenerate the configure script.\n";
+			print "       If the package doesn't BuildDepend on libtool2, you'll need to\n";
+			print "       update its build procedure to avoid passing\n";	 
+			print "          -Wl,-flat_namespace\n"; 
+			print "       when linking libraries.\n\n";
+			print "		  If this package actually requires a flat namespace build,\n";
+			print "		  then ignore this message.\n\n";
+			sleep 60;
 		}
 	}
 
