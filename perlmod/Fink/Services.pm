@@ -1332,7 +1332,8 @@ sub enforce_gcc {
 		'10.8' => '4.2',
 		'10.9' => '4.2',
 		'10.10' => '4.2',
-		'10.11' => '4.2'
+		'10.11' => '4.2',
+		'10.12' => '4.2'
 	);
 	my %gcc_abi_default = (
 		'2.95' => '2.95',
@@ -2142,7 +2143,7 @@ sub _get_option_help {
 		$negopt->{names} = [
 			map { length($_) > 1 ? "no-$_" : () } @{$opt->{names}}
 		];
-		$negopt->{help} = "Opposite of $opt->{names}->[0]";
+		$negopt->{help} = 'Opposite of --'.$opt->{names}->[0];
 		@realopts = ($opt, $negopt);
 	} else {
 		@realopts = $opt;
